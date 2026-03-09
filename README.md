@@ -1,4 +1,5 @@
 # ToneCraft
+[![License](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](http://www.gnu.org/licenses/gpl-3.0)   
 
 ## Description
 ToneCraft is a Thunderbird extension that detects (and blocks) unprofessional language in outgoing emails and suggests polite alternatives.
