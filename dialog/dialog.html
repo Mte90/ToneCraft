@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Tone Analysis</title>
+    <link rel="stylesheet" href="../common.css">
+</head>
+<body>
+    <div class="container">
+        <div class="status-area" id="statusSection">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span class="status-text" id="statusText">Professional</span>
+        </div>
+        <div class="section">
+            <div class="section-title">Issues Found</div>
+            <ul class="problem-list" id="problems">
+                <li>No issues found</li>
+            </ul>
+        </div>
+        <div class="section">
+            <div class="section-title">Suggested Email</div>
+            <div id="rewritten"></div>
+        </div>
+    </div>
+    <div class="dialog-actions">
+        <button class="btn-primary" id="replaceButton">Replace Text</button>
+        <button class="danger" id="ignoreButton">Send Anyway</button>
+    </div>
+
+    <script src="dialog.js"></script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ToneCraft - Settings</title>
+    <link rel="stylesheet" href="../common.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+        <div class="header">
+            <h1>ToneCraft</h1>
+            <p>AI Assistant Configuration</p>
+        </div>
+
+        <div class="form-container">
+            <form id="settingsForm">
+                <div class="form-group">
+                    <label for="apiKey">API Key</label>
+                    <input
+                        type="password"
+                        id="apiKey"
+                        name="apiKey"
+                        placeholder="Enter your API key"
+                        autocomplete="off"
+                    >
+                    <div class="help-text">Your API key will be stored locally</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="apiEndpoint">API Endpoint</label>
+                    <input
+                        type="text"
+                        id="apiEndpoint"
+                        name="apiEndpoint"
+                        placeholder="https://api.openai.com/chat/completions"
+                    >
+                    <div class="help-text">AI service host URL (OpenAI-Compatible)</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="model">Model</label>
+                    <input
+                        type="text"
+                        id="model"
+                        name="model"
+                        placeholder="gpt-4o-mini"
+                    >
+                    <div class="help-text">The model to use for tone generation</div>
+                </div>
+
+                <div class="form-group">
+                    <label>Enable tone check for these accounts</label>
+                    <input type="text" id="account-filter" placeholder="Enter account IDs or emails, comma separated" />
+                    <div class="help-text">Only emails sent from selected accounts will be checked</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="customPrompt">Custom Prompt</label>
+                    <textarea
+                        id="customPrompt"
+                        name="customPrompt"
+                        placeholder="You are a helpful assistant that analyzes email tone."
+                    ></textarea>
+                    <div class="help-text">A custom prompt to improve tone suggestions</div>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" class="btn btn-primary" id="saveBtn">
+                        Save Settings
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="options.js"></script>
+</body>
+</html>
