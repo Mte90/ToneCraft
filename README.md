@@ -7,6 +7,8 @@ It helps you maintain a courteous tone and avoid accidental rudeness.
 
 PS: Extension tested also manually but it was written by: qwen3-coder-next, qwen3.5-122 and GLM-4.7 on OpenCode.
 
+<img width="1236" height="578" alt="Image" src="https://github.com/user-attachments/assets/05c88753-4ee8-4678-9b58-9ce5e3e3a4eb" />
+
 ## Features
 - Detect unprofessional tone in outgoing emails
 - Provide suggested rewrites that are more polite
