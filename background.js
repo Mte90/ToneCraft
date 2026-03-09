@@ -498,11 +498,9 @@ async function handleReplaceText() {
 
         if (originalMainContent && originalMainContent.trim().length > 0 && normalizedBody.includes(normalizedOriginal)) {
             // Extract text content from originalMainContent for matching
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = originalMainContent;
-            const originalText = tempDiv.textContent || tempDiv.innerText || '';
+            const originalText = originalText = new DOMParser().parseFromString(originalMainContent, 'text/html').body.textContent || '';
             tempDiv.innerHTML = currentBody;
-            const currentText = tempDiv.textContent || tempDiv.innerText || '';
+            const currentText =new DOMParser().parseFromString(currentBody, 'text/html').body.textContent || '';
 
             // Find position of original text in current body
             const textIndex = currentText.indexOf(originalText.trim());

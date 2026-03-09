@@ -23,6 +23,10 @@
     "open_in_tab": false
   },
   "browser_specific_settings": {
+    "gecko": {
+      "id": "tonecraft@extension.thunderbird.org",
+      "strict_min_version": "146.0"
+    },
     "thunderbird": {
       "id": "tonecraft@extension.thunderbird.org",
       "strict_min_version": "146"
