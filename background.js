@@ -3,18 +3,27 @@
  * Intercepts outgoing emails and checks tone using AI
  */
 
-const pendingComposes = new Map();
-
 // Track consecutive API failures for graceful degradation
 let consecutiveApiFailures = 0;
+
+// Pending compose operations indexed by tab ID
+const pendingComposes = new Map();
+// Set of tab IDs that should skip tone check when sending
+const tabsToSkipCheck = new Set();
 function initialize() {
     browser.compose.onBeforeSend.addListener(handleOnBeforeSend);
     browser.runtime.onMessage.addListener(handleMessage);
 }
 
 async function handleOnBeforeSend(tab, details) {
+    // Skip tone check if user clicked 'Send Anyway' on this tab
+    if (tabsToSkipCheck.has(tab.id)) {
+        tabsToSkipCheck.delete(tab.id);
+        return undefined;
+    }
 
     try {
+
         const settings = await browser.storage.local.get({
             apiEndpoint: '',
             apiKey: '',
@@ -441,9 +450,13 @@ async function handleIgnoreAndSend() {
 
     const { tab } = firstEntry;
 
+    // Add tab to set of tabs to skip tone check on next send
+    tabsToSkipCheck.add(tab.id);
+
     await browser.tabs.update(tab.id, { active: true });
     await browser.windows.update(tab.windowId, { focused: true });
 
+    pendingComposes.delete(tab.id);
     await browser.compose.sendMessage(tab.id);
 
     showNotification(
