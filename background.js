@@ -69,8 +69,8 @@ async function handleOnBeforeSend(tab, details) {
                     },
                     originalRecipients: details.to || []
                 });
-                
-                await openDialogWindow();
+
+                await openDialogWindow(tab.id);
                 return { cancel: true };
             }
             
@@ -103,7 +103,7 @@ async function handleOnBeforeSend(tab, details) {
 
         // Get extracted structure for this tab (if available)
         const extractedStructure = window.extractedEmailStructure ? window.extractedEmailStructure[tab.id] : null;
-        
+
         pendingComposes.set(tab.id, {
             tab,
             analysisData: {
@@ -119,14 +119,15 @@ async function handleOnBeforeSend(tab, details) {
             originalRecipients: details.to || []
         });
 
-        await openDialogWindow();
-
+        await openDialogWindow(tab.id);
         return { cancel: true };
 
     } catch (error) {
         console.error('Error in onBeforeSend handler:', error);
         consecutiveApiFailures++;
         
+        // Check if we have access to settings (might be undefined if error occurred before)
+        if (typeof settings !== 'undefined') {
             // If account is configured (in checkedAccounts), block send on error
             if (senderAccountId && settings.checkedAccounts.includes(senderAccountId)) {
                 
@@ -144,8 +145,9 @@ async function handleOnBeforeSend(tab, details) {
                     originalRecipients: details.to || []
                 });
             
-            await openDialogWindow();
-            return { cancel: true };
+                await openDialogWindow(tab.id);
+                return { cancel: true };
+            }
         }
         
         // Account is not configured - graceful degradation with notification
@@ -183,7 +185,6 @@ async function extractEmailContent(tab, details, composeDetails = null) {
                     originalMainContent: mainContent
                 };
             }
-
             
             // Send only mainContent to AI (not quotes, not signature)
             content += mainContent;
@@ -397,58 +398,73 @@ function extractEmailStructure(html) {
     }
 }
 
-async function openDialogWindow() {
+async function openDialogWindow(tabId) {
     try {
         const windows = await browser.windows.getAll();
         const dialogWindow = windows.find(w => w.type === 'popup');
 
+        // Always close existing dialog and open new one with correct tabId
         if (dialogWindow) {
-            await browser.windows.update(dialogWindow.id, { focused: true });
-        } else {
-            await browser.windows.create({
-                url: 'dialog/dialog.html',
-                type: 'popup',
-                state: 'maximized'
-            });
+            await browser.windows.remove(dialogWindow.id);
         }
+        
+        // Pass tabId as URL parameter so dialog knows which email to request
+        const url = tabId ? `dialog/dialog.html?tabId=${tabId}` : 'dialog/dialog.html';
+        await browser.windows.create({
+            url: url,
+            type: 'popup',
+            state: 'maximized'
+        });
     } catch (error) {
         console.error('Error opening dialog window:', error);
-        showNotification(
-            'Dialog Error',
-            'Could not open tone analysis dialog.'
-        );
     }
 }
 
 function handleMessage(message, sender, sendResponse) {
-    if (message.action === 'getAnalysisData') {
 
-        // Get the first (most recent) compose data
-        const firstEntry = pendingComposes.values().next().value;
-        sendResponse({ analysisData: firstEntry?.analysisData });
+    if (message.action === 'getAnalysisData') {
+        // Use tabId from message to get the correct email data
+        const tabId = message.tabId ? Number(message.tabId) : null; // Convert string to number for Map lookup
+        const entry = tabId ? pendingComposes.get(tabId) : pendingComposes.values().next().value;
+
+        sendResponse({ analysisData: entry?.analysisData });
         return true;
     }
 
     if (message.action === 'replaceText') {
-        handleReplaceText();
+        handleReplaceText(message.tabId ? Number(message.tabId) : null);
         return false;
     }
 
     if (message.action === 'ignoreAndSend') {
-        handleIgnoreAndSend();
+        handleIgnoreAndSend(message.tabId ? Number(message.tabId) : null);
+        return false;
+    }
+
+    if (message.action === 'cleanupTab') {
+        // Clean up pending compose data for a specific tab
+        if (message.tabId) {
+            pendingComposes.delete(Number(message.tabId));
+        }
+        return false;
+    }
+
+    if (message.action === 'editOriginal') {
+        handleEditOriginal(message.tabId ? Number(message.tabId) : null);
         return false;
     }
 
     return false;
 }
-async function handleIgnoreAndSend() {
-    const firstEntry = pendingComposes.values().next().value;
-    if (!firstEntry) {
+async function handleIgnoreAndSend(tabId) {
+    // Use tabId from parameter to get the correct entry
+    const entry = tabId ? pendingComposes.get(tabId) : pendingComposes.values().next().value;
+    if (!entry) {
         console.error('No pending compose tab');
         return;
     }
 
-    const { tab } = firstEntry;
+    const { tab } = entry;
 
     // Add tab to set of tabs to skip tone check on next send
     tabsToSkipCheck.add(tab.id);
@@ -465,22 +481,33 @@ async function handleIgnoreAndSend() {
     );
 }
 
-async function handleReplaceText() {
-    // Get the MOST RECENT entry (last added) instead of oldest
-    const entries = Array.from(pendingComposes.entries());
-    const lastEntry = entries.pop();
-    if (!lastEntry) {
+async function handleReplaceText(tabId) {
+    // Use tabId from parameter to get the correct entry
+    let entry, actualTabId;
+    if (tabId && pendingComposes.has(tabId)) {
+        entry = pendingComposes.get(tabId);
+        actualTabId = tabId;
+    } else {
+        // Fallback to last entry if tabId not found
+        const entries = Array.from(pendingComposes.entries());
+        const lastEntry = entries.pop();
+        if (!lastEntry) {
+            console.error('No pending compose tab');
+            return;
+        }
+        [actualTabId, entry] = lastEntry;
+    }
+    
+    if (!entry) {
         console.error('No pending compose tab');
         return;
     }
-    const [tabId, entry] = lastEntry;
     const { tab, analysisData } = entry;
 
     if (!analysisData || !analysisData.rewrittenEmail) {
         console.error('No rewritten email to replace');
         return;
     }
-
 
     try {
         await browser.tabs.update(tab.id, { active: true });
@@ -511,9 +538,8 @@ async function handleReplaceText() {
 
         if (originalMainContent && originalMainContent.trim().length > 0 && normalizedBody.includes(normalizedOriginal)) {
             // Extract text content from originalMainContent for matching
-            const originalText = originalText = new DOMParser().parseFromString(originalMainContent, 'text/html').body.textContent || '';
-            tempDiv.innerHTML = currentBody;
-            const currentText =new DOMParser().parseFromString(currentBody, 'text/html').body.textContent || '';
+            const originalText = new DOMParser().parseFromString(originalMainContent, 'text/html').body.textContent || '';
+            const currentText = new DOMParser().parseFromString(currentBody, 'text/html').body.textContent || '';
 
             // Find position of original text in current body
             const textIndex = currentText.indexOf(originalText.trim());
@@ -531,18 +557,20 @@ async function handleReplaceText() {
     } catch (error) {
         console.error('Error replacing email text:', error);
     } finally {
-        pendingComposes.delete(tab.id);
+
+        pendingComposes.delete(actualTabId);
     }
 }
 
-async function handleEditOriginal() {
-    const firstEntry = pendingComposes.values().next().value;
-    if (!firstEntry) {
+async function handleEditOriginal(tabId) {
+    // Use tabId from parameter to get the correct entry
+    const entry = tabId ? pendingComposes.get(tabId) : pendingComposes.values().next().value;
+    if (!entry) {
         console.error('No pending compose tab');
         return;
     }
 
-    const { tab } = firstEntry;
+    const { tab } = entry;
 
     try {
         await browser.tabs.update(tab.id, { active: true });
@@ -550,7 +578,8 @@ async function handleEditOriginal() {
     } catch (error) {
         console.error('Error returning to compose window:', error);
     } finally {
-        pendingComposes.delete(tab.id);
+
+        pendingComposes.delete(tabId || tab.id);
     }
 }
 

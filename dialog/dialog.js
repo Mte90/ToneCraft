@@ -1,15 +1,51 @@
 // dialog/dialog.js - Dialog UI logic for tone analysis results
 
+// Get tabId from URL query parameter
+function getTabIdFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('tabId');
+}
+
+let currentTabId = getTabIdFromUrl();
 let analysisData = null;
 
 // Receive analysis data from background script
-browser.runtime.sendMessage({ action: 'getAnalysisData' }, (response) => {
+
+browser.runtime.sendMessage({ action: 'getAnalysisData', tabId: currentTabId }, (response) => {
+
   if (browser.runtime.lastError) {
     console.error('Error receiving analysis data:', browser.runtime.lastError.message);
+    showError('Connection error with background script');
     return;
   }
   
   analysisData = response.analysisData;
+
+  
+  if (!analysisData) {
+    console.error('No analysis data received for tabId:', currentTabId);
+    showError('No email analysis found. Please try sending the email again.');
+    return;
+  }
+  
+
+  renderDialog(analysisData);
+});
+browser.runtime.sendMessage({ action: 'getAnalysisData', tabId: currentTabId }, (response) => {
+  if (browser.runtime.lastError) {
+    console.error('Error receiving analysis data:', browser.runtime.lastError.message);
+    showError('Connection error with background script');
+    return;
+  }
+  
+  analysisData = response.analysisData;
+  
+  if (!analysisData) {
+    console.error('No analysis data received for tabId:', currentTabId);
+    showError('No email analysis found. Please try sending the email again.');
+    return;
+  }
+  
   renderDialog(analysisData);
 });
 
@@ -154,13 +190,17 @@ function signalIgnoreAndSend() {
 
 // Close the dialog window
 function closeDialog() {
+  // Clean up pending compose data when dialog is closed without action
+  if (currentTabId) {
+    browser.runtime.sendMessage({ action: 'cleanupTab', tabId: currentTabId });
+  }
   window.close();
 }
 
 // Event listeners for buttons
 // Replace Text button - send rewritten text to compose window
 document.getElementById('replaceButton').addEventListener('click', () => {
-  browser.runtime.sendMessage({ action: 'replaceText' }).then(() => {
+  browser.runtime.sendMessage({ action: 'replaceText', tabId: currentTabId }).then(() => {
     window.close();
   }).catch(err => {
     console.error('Error sending replaceText signal:', err);
@@ -169,7 +209,7 @@ document.getElementById('replaceButton').addEventListener('click', () => {
 });
 // Send Anyway button - send email without modifications
 document.getElementById('ignoreButton').addEventListener('click', () => {
-  browser.runtime.sendMessage({ action: 'ignoreAndSend' }).then(() => {
+  browser.runtime.sendMessage({ action: 'ignoreAndSend', tabId: currentTabId }).then(() => {
     window.close();
   }).catch(err => {
     console.error('Error sending ignoreAndSend signal:', err);
@@ -177,3 +217,24 @@ document.getElementById('ignoreButton').addEventListener('click', () => {
   });
 });
 
+// Edit Original button
+document.getElementById('editButton')?.addEventListener('click', () => {
+  browser.runtime.sendMessage({ action: 'editOriginal', tabId: currentTabId }).then(() => {
+    window.close();
+  }).catch(err => {
+    console.error('Error sending editOriginal signal:', err);
+    window.close();
+  });
+});
+
+// Show error message in dialog
+function showError(message) {
+  console.error('[dialog.js] Error:', message);
+  document.body.innerHTML = `
+    <div style="padding: 20px; text-align: center; color: #d32f2f;">
+      <h2>Error</h2>
+      <p>${message}</p>
+      <button onclick="window.close()" style="margin-top: 20px; padding: 10px 20px;">Close</button>
+    </div>
+  `;
+}
