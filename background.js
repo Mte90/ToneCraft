@@ -509,6 +509,16 @@ async function handleReplaceText(tabId) {
         return;
     }
 
+    // Validate tab exists first
+    try {
+        await browser.tabs.get(tab.id);
+    } catch (error) {
+        console.error('Tab validation failed:', error);
+        showNotification('Replace Failed', 'The compose window has been closed.');
+        pendingComposes.delete(actualTabId);
+        return;
+    }
+
     try {
         await browser.tabs.update(tab.id, { active: true });
         await browser.windows.update(tab.windowId, { focused: true });
@@ -519,7 +529,7 @@ async function handleReplaceText(tabId) {
 
         // Extract CURRENT email structure from the current body
         // This captures any manual edits the user made to quotes/signature
-        const { quotedContent: currentQuoted, signatureContent: currentSignature } = extractEmailStructure(currentBody);
+        const { quotedContent: currentQuoted, signatureContent: currentSignature, mainContent: currentMainContent } = extractEmailStructure(currentBody);
 
         // Get the originalMainContent that was sent to AI
         const extractedStructure = window.extractedEmailStructure && window.extractedEmailStructure[tab.id];
@@ -528,36 +538,85 @@ async function handleReplaceText(tabId) {
         // Clean the rewritten email
         const cleanRewrittenEmail = filterQuotedReplies(analysisData.rewrittenEmail);
 
-        // Normalize for comparison (handle &nbsp; vs space)
-        const normalizedOriginal = originalMainContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-        const normalizedBody = currentBody.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+        // Parse current body to find target block for replacement
+        const parser = new DOMParser();
+        const currentDoc = parser.parseFromString(currentBody, 'text/html');
+        
+        // Check if both quotes and signature are empty - if so, use rewritten content as plain text
+        const hasQuotes = currentQuoted && currentQuoted.trim().length > 0;
+        const hasSignature = currentSignature && currentSignature.trim().length > 0;
+        
+        if (!hasQuotes && !hasSignature) {
+            // No quotes or signature - output is just the rewritten content (plain text)
+            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
+            pendingComposes.delete(actualTabId);
+            return;
+        }
+        
+        // Find all <p> elements that are NOT inside blockquotes and NOT part of signature
+        const allParagraphs = currentDoc.querySelectorAll('p');
+        const candidateParagraphs = [];
+        
+        for (let i = 0; i < allParagraphs.length; i++) {
+            const p = allParagraphs[i];
+            // Skip if inside blockquote
+            if (p.closest('blockquote')) {
+                continue;
+            }
+            // Skip if inside signature
+            if (p.closest('[class^="moz-signature"]') || (p.textContent.trim().startsWith('-- ') && currentSignature && currentSignature.includes(p.outerHTML))) {
+                continue;
+            }
+            candidateParagraphs.push(p);
+        }
 
-        // Try simple replace with regex to handle whitespace differences
-        let reconstructedBody = currentBody;
+        if (candidateParagraphs.length === 0) {
+            // No candidate paragraphs found - just use rewritten content as full body
+            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
+            pendingComposes.delete(actualTabId);
+            return;
+        }
+
+        // Try to find the target paragraph by matching normalized text content
+        let targetParagraph = null;
         let replaced = false;
 
-        if (originalMainContent && originalMainContent.trim().length > 0 && normalizedBody.includes(normalizedOriginal)) {
-            // Extract text content from originalMainContent for matching
-            const originalText = new DOMParser().parseFromString(originalMainContent, 'text/html').body.textContent || '';
-            const currentText = new DOMParser().parseFromString(currentBody, 'text/html').body.textContent || '';
-
-            // Find position of original text in current body
-            const textIndex = currentText.indexOf(originalText.trim());
-            if (textIndex >= 0) {
-                // Found it - now replace the HTML tag containing this text
-                // Use a simpler approach: replace the entire tag block
-                const tagRegex = /<p[^>]*>.*?<\/p>/is;
-                reconstructedBody = currentBody.replace(tagRegex, '<p>' + cleanRewrittenEmail + '</p>');
-                replaced = true;
+        if (originalMainContent && originalMainContent.trim().length > 0) {
+            // Normalize for comparison (handle &nbsp; vs space)
+            const normalizedOriginal = originalMainContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+            
+            for (let i = 0; i < candidateParagraphs.length; i++) {
+                const p = candidateParagraphs[i];
+                const pText = p.textContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+                
+                // Check if this paragraph's text contains or matches the original text
+                if (pText.includes(normalizedOriginal) || normalizedOriginal.includes(pText)) {
+                    targetParagraph = p;
+                    break;
+                }
             }
         }
 
-        // Update the body
-        await browser.compose.setComposeDetails(tab.id, { body: reconstructedBody });
+        // Fallback: use first candidate paragraph if no match found
+        if (!targetParagraph) {
+            targetParagraph = candidateParagraphs[0];
+        }
+
+        // Replace the target paragraph
+        if (targetParagraph) {
+            targetParagraph.outerHTML = '<p>' + cleanRewrittenEmail + '</p>';
+            await browser.compose.setComposeDetails(tab.id, { body: currentDoc.body.innerHTML });
+            replaced = true;
+        }
+
+        // If still no replacement happened, use the rewritten content as full body
+        if (!replaced) {
+            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
+        }
     } catch (error) {
         console.error('Error replacing email text:', error);
+        showNotification('Replace Failed', error.message || 'Could not replace email text.');
     } finally {
-
         pendingComposes.delete(actualTabId);
     }
 }
