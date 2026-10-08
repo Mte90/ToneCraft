@@ -235,6 +235,7 @@ document.addEventListener('DOMContentLoaded', () => {
         apiKey: apiKey,
         apiEndpoint: apiEndpoint,
         model: model,
+        customPrompt: customPrompt,
       }).then(() => {
         showStatus('Settings saved successfully!', 'success');
       }).catch((error) => {
