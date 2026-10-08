@@ -632,7 +632,23 @@ async function checkTone(emailContent, settings, retryCount = 0) {
 
         if (!response.ok) {
             const errorText = await response.text();
-            // Don't expose API key in error messages
+            
+            // HTTP 4xx - no retry, return immediately
+            if (response.status >= 400 && response.status < 500) {
+                return {
+                    success: false,
+                    error: `API error ${response.status}: ${errorText || response.statusText}`
+                };
+            }
+            
+            // HTTP 5xx - retry once after 3 seconds
+            if (response.status >= 500 && retryCount === 0) {
+                console.log(`API server error ${response.status} - retrying after 3s...`);
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return checkTone(emailContent, settings, retryCount + 1);
+            }
+            
+            // HTTP 5xx with retryCount === 1, or other unexpected status
             return {
                 success: false,
                 error: `API error ${response.status}: ${errorText || response.statusText}`
@@ -701,9 +717,10 @@ async function checkTone(emailContent, settings, retryCount = 0) {
         clearTimeout(timeoutId);
 
         if (error.name === 'AbortError') {
-            // Retry once on timeout
+            // Retry once on timeout after 3 seconds
             if (retryCount === 0) {
-                console.log('API timeout - retrying...');
+                console.log('API timeout - retrying after 3s...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
                 return checkTone(emailContent, settings, retryCount + 1);
             }
             return {
@@ -714,6 +731,12 @@ async function checkTone(emailContent, settings, retryCount = 0) {
         }
 
         if (error.name === 'TypeError' && (error.message.includes('fetch') || error.message.includes('Network'))) {
+            // Retry once on network error after 3 seconds
+            if (retryCount === 0) {
+                console.log('Network error - retrying after 3s...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return checkTone(emailContent, settings, retryCount + 1);
+            }
             return {
                 success: false,
                 error: 'Network error: Could not connect to API server',
