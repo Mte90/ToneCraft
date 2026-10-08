@@ -3,7 +3,7 @@
  * Tests for checkTone function - HTTP client for AI API
  */
 
-const { checkTone } = require('./ai-client.js');
+const { checkTone } = require('../src/ai-client.js');
 
 // Mock global.fetch
 global.fetch = jest.fn();
@@ -256,7 +256,18 @@ describe('AI Client - checkTone', () => {
     });
 
     describe('Error Cases - HTTP Errors', () => {
+        beforeEach(() => {
+            jest.useFakeTimers();
+        });
+
         test('Test 4: HTTP 500 error (return error)', async () => {
+            // First 500 triggers retry, then fails
+            fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+                text: async () => 'Server error occurred'
+            });
             fetch.mockResolvedValueOnce({
                 ok: false,
                 status: 500,
@@ -264,11 +275,17 @@ describe('AI Client - checkTone', () => {
                 text: async () => 'Server error occurred'
             });
 
-            const result = await checkTone('Test email', validSettings);
+            const resultPromise = checkTone('Test email', validSettings);
+
+            // Advance past the retry delay
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('HTTP error 500');
             expect(result.error).toContain('Server error occurred');
+            expect(fetch).toHaveBeenCalledTimes(2); // Retried once
         });
 
         test('Handles 401 Unauthorized error', async () => {
@@ -283,6 +300,7 @@ describe('AI Client - checkTone', () => {
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('HTTP error 401');
+            expect(fetch).toHaveBeenCalledTimes(1);
         });
 
         test('Handles 429 Rate Limit error', async () => {
@@ -297,34 +315,75 @@ describe('AI Client - checkTone', () => {
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('HTTP error 429');
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
         });
     });
 
     describe('Error Cases - Timeout', () => {
+        beforeEach(() => {
+            jest.useFakeTimers();
+        });
+
         test('Test 5: Network timeout (return error)', async () => {
             // Mock fetch that rejects with AbortError
             fetch.mockRejectedValueOnce(
                 new DOMException('Aborted', 'AbortError')
             );
+            fetch.mockRejectedValueOnce(
+                new DOMException('Aborted', 'AbortError')
+            );
 
-            const result = await checkTone('Test email', validSettings);
+            const resultPromise = checkTone('Test email', validSettings);
+
+            // Advance past the first timeout (10s)
+            await jest.advanceTimersByTimeAsync(10000);
+
+            // Advance past the retry delay (3s)
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('timeout');
             expect(result.error).toContain('10 seconds');
+            expect(fetch).toHaveBeenCalledTimes(2); // Retried once
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
         });
     });
 
     describe('Error Cases - Network Errors', () => {
+        beforeEach(() => {
+            jest.useFakeTimers();
+        });
+
         test('Handles network connection error', async () => {
             fetch.mockRejectedValueOnce(
                 new TypeError('Failed to fetch')
             );
+            fetch.mockRejectedValueOnce(
+                new TypeError('Failed to fetch')
+            );
 
-            const result = await checkTone('Test email', validSettings);
+            const resultPromise = checkTone('Test email', validSettings);
+
+            // Advance past the first timeout
+            await jest.advanceTimersByTimeAsync(10000);
+
+            // Advance past the retry delay
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('Network error');
+            expect(fetch).toHaveBeenCalledTimes(2); // Retried once
         });
 
         test('Handles unexpected errors', async () => {
@@ -336,6 +395,11 @@ describe('AI Client - checkTone', () => {
 
             expect(result.success).toBe(false);
             expect(result.error).toContain('Unexpected error');
+            expect(fetch).toHaveBeenCalledTimes(1); // Not retryable
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
         });
     });
 
@@ -413,6 +477,130 @@ describe('AI Client - checkTone', () => {
             expect(result.success).toBe(false);
             expect(result.error).toContain('Missing required settings');
             expect(fetch).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('Retry Logic', () => {
+        const validSettings = {
+            apiEndpoint: 'https://api.example.com/v1/chat/completions',
+            apiKey: 'test-api-key-12345',
+            model: 'gpt-4'
+        };
+
+        const validAIResponse = {
+            choices: [
+                {
+                    message: {
+                        content: JSON.stringify({
+                            isProfessional: false,
+                            problems: ['Too aggressive tone', 'Lacks proper greeting'],
+                            rewrittenEmail: 'Dear Team,\n\nI wanted to follow up on the project...',
+                            suggestions: ['Add a greeting', 'Soften the language']
+                        })
+                    }
+                }
+            ]
+        };
+
+        beforeEach(() => {
+            jest.clearAllMocks();
+        });
+
+        afterEach(() => {
+            jest.useRealTimers();
+        });
+
+        test('Timeout triggers retry after 3 seconds then succeeds', async () => {
+            jest.useFakeTimers();
+
+            // First call times out, second call succeeds
+            fetch.mockRejectedValueOnce(
+                new DOMException('Aborted', 'AbortError')
+            );
+            fetch.mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => validAIResponse
+            });
+
+            // Start the request
+            const resultPromise = checkTone('Test email content', validSettings);
+
+            // Advance past the first timeout (10s)
+            await jest.advanceTimersByTimeAsync(10000);
+
+            // Advance past the retry delay (3s)
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
+
+            expect(result.success).toBe(true);
+            expect(fetch).toHaveBeenCalledTimes(2);
+            expect(result.error).toBeUndefined();
+        });
+
+        test('Network error triggers retry after 3 seconds then fails again', async () => {
+            jest.useFakeTimers();
+
+            // Both calls fail with network error
+            fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+            fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+            const resultPromise = checkTone('Test email content', validSettings);
+
+            // Advance past the first timeout
+            await jest.advanceTimersByTimeAsync(10000);
+
+            // Advance past the retry delay
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('Network error');
+            expect(fetch).toHaveBeenCalledTimes(2);
+        });
+
+        test('HTTP 401 does NOT trigger retry (single attempt)', async () => {
+            fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 401,
+                statusText: 'Unauthorized',
+                text: async () => 'Invalid API key'
+            });
+
+            const result = await checkTone('Test email content', validSettings);
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('HTTP error 401');
+            expect(fetch).toHaveBeenCalledTimes(1); // No retry
+        });
+
+        test('HTTP 500 triggers retry after 3 seconds', async () => {
+            jest.useFakeTimers();
+
+            // First call fails with 500, second succeeds
+            fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+                text: async () => 'Server error'
+            });
+            fetch.mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => validAIResponse
+            });
+
+            const resultPromise = checkTone('Test email content', validSettings);
+
+            // Advance past the retry delay
+            await jest.advanceTimersByTimeAsync(3000);
+
+            const result = await resultPromise;
+
+            expect(result.success).toBe(true);
+            expect(fetch).toHaveBeenCalledTimes(2);
         });
     });
 });

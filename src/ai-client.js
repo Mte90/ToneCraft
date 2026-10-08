@@ -21,6 +21,21 @@ async function checkTone(emailContent, settings) {
         return errorResponse('Missing required settings: apiEndpoint, apiKey, or model');
     }
 
+    return makeRequestWithRetry(emailContent, settings, 0);
+}
+
+/**
+ * Make request with retry logic
+ * @param {string} emailContent - The email text to analyze
+ * @param {Object} settings - Configuration object
+ * @param {number} attempt - Current attempt number (0 = first attempt)
+ * @returns {Promise<Object>} - Result object
+ */
+async function makeRequestWithRetry(emailContent, settings, attempt) {
+    const isRetry = attempt > 0;
+    const maxAttempts = 2; // Initial attempt + 1 retry
+    const retryDelay = 3000; // 3 seconds
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -49,9 +64,19 @@ async function checkTone(emailContent, settings) {
 
         clearTimeout(timeoutId);
 
+        // Check for HTTP errors
         if (!response.ok) {
             const errorText = await response.text();
-            return errorResponse(`HTTP error ${response.status}: ${errorText || response.statusText}`);
+            const errorMessage = `HTTP error ${response.status}: ${errorText || response.statusText}`;
+
+            // Retry on 5xx errors, but not on 4xx errors
+            if (response.status >= 500 && !isRetry) {
+                // Wait before retrying
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                return makeRequestWithRetry(emailContent, settings, attempt + 1);
+            }
+
+            return errorResponse(errorMessage);
         }
 
         let jsonResponse;
@@ -77,6 +102,16 @@ async function checkTone(emailContent, settings) {
 
     } catch (error) {
         clearTimeout(timeoutId);
+
+        // Check if this is a retryable error
+        const shouldRetry = shouldRetryError(error);
+
+        if (shouldRetry && !isRetry) {
+            // Wait before retrying
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            return makeRequestWithRetry(emailContent, settings, attempt + 1);
+        }
+
         return handleFetchError(error);
     }
 }
@@ -87,6 +122,22 @@ if (typeof module !== 'undefined' && module.exports) {
 
 // Helper for consistent error responses
 const errorResponse = (message) => ({ success: false, error: message });
+
+// Helper to determine if an error should trigger a retry
+const shouldRetryError = (error) => {
+    // Timeout (AbortError) - retryable
+    if (error.name === 'AbortError') {
+        return true;
+    }
+
+    // Network errors (TypeError with fetch) - retryable
+    if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        return true;
+    }
+
+    // Other errors - not retryable
+    return false;
+};
 
 // Helper to handle fetch errors with proper timeout/network handling
 const handleFetchError = (error) => {
