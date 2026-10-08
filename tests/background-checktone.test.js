@@ -1,6 +1,6 @@
 /**
  * checkTone Retry Logic Tests
- * Tests for the live checkTone function in background.js
+ * Tests for the checkTone function in src/ai-client.js
  * Verifies 3-second retry delay on timeout, network errors, and HTTP 5xx
  */
 
@@ -18,7 +18,7 @@ const browser = {
 
 global.browser = browser;
 
-const { checkTone } = require('../background.js');
+const { checkTone } = require('../src/ai-client.js');
 
 // Mock fetch
 global.fetch = jest.fn();

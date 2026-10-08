@@ -37,5 +37,11 @@ if (typeof global.MessageChannel === 'undefined') {
     };
 }
 
+// Load AI client and assign checkTone to globalThis for tests
+if (typeof globalThis.checkTone === 'undefined') {
+    const { checkTone } = require('./src/ai-client.js');
+    globalThis.checkTone = checkTone;
+}
+
 // Mock the problematic @exodus/bytes module
 jest.mock('@exodus/bytes', () => ({}));

@@ -10,31 +10,21 @@
  *   - {string} apiEndpoint - The AI API endpoint URL
  *   - {string} apiKey - The API authentication key
  *   - {string} model - The model name to use
+ * @param {number} retryCount - Current retry count (internal use)
  * @returns {Promise<Object>} - Result object with:
  *   - {boolean} success - Whether the request succeeded
  *   - {Object} data - Parsed response data if successful
  *   - {string} error - Error message if failed
+ *   - {boolean} isTimeout - True if timeout error
+ *   - {boolean} isNetworkError - True if network error
  */
-async function checkTone(emailContent, settings) {
-    // Validate settings
+async function checkTone(emailContent, settings, retryCount = 0) {
     if (!settings.apiEndpoint || !settings.apiKey || !settings.model) {
-        return errorResponse('Missing required settings: apiEndpoint, apiKey, or model');
+        return {
+            success: false,
+            error: 'Missing required settings: apiEndpoint, apiKey, or model'
+        };
     }
-
-    return makeRequestWithRetry(emailContent, settings, 0);
-}
-
-/**
- * Make request with retry logic
- * @param {string} emailContent - The email text to analyze
- * @param {Object} settings - Configuration object
- * @param {number} attempt - Current attempt number (0 = first attempt)
- * @returns {Promise<Object>} - Result object
- */
-async function makeRequestWithRetry(emailContent, settings, attempt) {
-    const isRetry = attempt > 0;
-    const maxAttempts = 2; // Initial attempt + 1 retry
-    const retryDelay = 3000; // 3 seconds
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -51,7 +41,7 @@ async function makeRequestWithRetry(emailContent, settings, attempt) {
                 messages: [
                     {
                         role: 'system',
-                        content: 'You are a helpful assistant that analyzes email tone. Return your analysis as JSON with these fields: isProfessional (boolean), problems (array of strings), rewrittenEmail (string), suggestions (array of strings).'
+                        content: ((settings.customPrompt ? settings.customPrompt + '\n\n' : '') + 'Analyze the email text to determine its language, then respond in that same language. Provide ONLY email body content, NO signatures, NO closing clauses, NO placeholder signatures. Return your analysis as JSON with these fields: isProfessional (boolean), problems (array of strings), rewrittenEmail (string), suggestions (array of strings).'),
                     },
                     {
                         role: 'user',
@@ -64,113 +54,127 @@ async function makeRequestWithRetry(emailContent, settings, attempt) {
 
         clearTimeout(timeoutId);
 
-        // Check for HTTP errors
         if (!response.ok) {
             const errorText = await response.text();
-            const errorMessage = `HTTP error ${response.status}: ${errorText || response.statusText}`;
-
-            // Retry on 5xx errors, but not on 4xx errors
-            if (response.status >= 500 && !isRetry) {
-                // Wait before retrying
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
-                return makeRequestWithRetry(emailContent, settings, attempt + 1);
+            
+            // HTTP 4xx - no retry, return immediately
+            if (response.status >= 400 && response.status < 500) {
+                return {
+                    success: false,
+                    error: `API error ${response.status}: ${errorText || response.statusText}`
+                };
             }
-
-            return errorResponse(errorMessage);
+            
+            // HTTP 5xx - retry once after 3 seconds
+            if (response.status >= 500 && retryCount === 0) {
+                console.log(`API server error ${response.status} - retrying after 3s...`);
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return checkTone(emailContent, settings, retryCount + 1);
+            }
+            
+            // HTTP 5xx with retryCount === 1, or other unexpected status
+            return {
+                success: false,
+                error: `API error ${response.status}: ${errorText || response.statusText}`
+            };
         }
 
         let jsonResponse;
         try {
             jsonResponse = await response.json();
         } catch (parseError) {
-            return errorResponse(`Failed to parse JSON response: ${parseError.message}`);
+            return {
+                success: false,
+                error: `Failed to parse JSON response: ${parseError.message}`
+            };
         }
 
-        const aiContent = extractAIContent(jsonResponse);
-        
+        // OpenAI format: response.choices[0].message.content
+        // Some APIs return content directly
+        let aiContent;
+        if (jsonResponse.choices && jsonResponse.choices[0] && jsonResponse.choices[0].message) {
+            aiContent = jsonResponse.choices[0].message.content;
+        } else if (jsonResponse.content) {
+            aiContent = jsonResponse.content;
+        } else {
+            return {
+                success: false,
+                error: 'Unexpected API response format'
+            };
+        }
+
         let parsedContent;
         try {
-            parsedContent = parseAIResponse(aiContent);
+            const cleanContent = aiContent.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            parsedContent = JSON.parse(cleanContent);
         } catch (parseError) {
-            return errorResponse(`Failed to parse AI response content: ${parseError.message}`);
+            return {
+                success: false,
+                error: `Failed to parse AI response content: ${parseError.message}`
+            };
+        }
+
+        const requiredFields = ['isProfessional', 'problems', 'rewrittenEmail', 'suggestions'];
+        for (const field of requiredFields) {
+            if (!(field in parsedContent)) {
+                return {
+                    success: false,
+                    error: `Missing required field in AI response: ${field}`
+                };
+            }
         }
 
         return {
             success: true,
-            data: parsedContent
+            data: {
+                isProfessional: parsedContent.isProfessional,
+                problems: parsedContent.problems,
+                rewrittenEmail: parsedContent.rewrittenEmail,
+                suggestions: parsedContent.suggestions
+            }
         };
 
     } catch (error) {
         clearTimeout(timeoutId);
 
-        // Check if this is a retryable error
-        const shouldRetry = shouldRetryError(error);
-
-        if (shouldRetry && !isRetry) {
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
-            return makeRequestWithRetry(emailContent, settings, attempt + 1);
+        if (error.name === 'AbortError') {
+            // Retry once on timeout after 3 seconds
+            if (retryCount === 0) {
+                console.log('API timeout - retrying after 3s...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return checkTone(emailContent, settings, retryCount + 1);
+            }
+            return {
+                success: false,
+                error: 'Request timeout: API did not respond within 10 seconds',
+                isTimeout: true
+            };
         }
 
-        return handleFetchError(error);
+        if (error.name === 'TypeError' && (error.message.includes('fetch') || error.message.includes('Network'))) {
+            // Retry once on network error after 3 seconds
+            if (retryCount === 0) {
+                console.log('Network error - retrying after 3s...');
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return checkTone(emailContent, settings, retryCount + 1);
+            }
+            return {
+                success: false,
+                error: 'Network error: Could not connect to API server',
+                isNetworkError: true
+            };
+        }
+
+        return {
+            success: false,
+            error: `Unexpected error: ${error.message}`
+        };
     }
 }
 
+// Dual export for both module and browser environments
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { checkTone };
+} else {
+    globalThis.checkTone = checkTone;
 }
-
-// Helper for consistent error responses
-const errorResponse = (message) => ({ success: false, error: message });
-
-// Helper to determine if an error should trigger a retry
-const shouldRetryError = (error) => {
-    // Timeout (AbortError) - retryable
-    if (error.name === 'AbortError') {
-        return true;
-    }
-
-    // Network errors (TypeError with fetch) - retryable
-    if (error.name === 'TypeError' && error.message.includes('fetch')) {
-        return true;
-    }
-
-    // Other errors - not retryable
-    return false;
-};
-
-// Helper to handle fetch errors with proper timeout/network handling
-const handleFetchError = (error) => {
-    if (error.name === 'AbortError') {
-        return errorResponse('Request timeout: API did not respond within 10 seconds');
-    }
-
-    if (error.name === 'TypeError' && error.message.includes('fetch')) {
-        return errorResponse(`Network error: ${error.message}`);
-    }
-
-    return errorResponse(`Unexpected error: ${error.message}`);
-};
-
-// Helper to extract AI content from various response formats
-const extractAIContent = (response) => {
-    if (response.choices?.[0]?.message?.content) {
-        return response.choices[0].message.content;
-    }
-    if (response.content) return response.content;
-    throw new Error('Unexpected API response format');
-};
-
-// Helper to parse and validate AI response
-const parseAIResponse = (content) => {
-    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    
-    const requiredFields = ['isProfessional', 'problems', 'rewrittenEmail', 'suggestions'];
-    const missing = requiredFields.find(field => !(field in parsed));
-    if (missing) {
-        throw new Error(`Missing required field: ${missing}`);
-    }
-    
-    return parsed;
-};

@@ -283,8 +283,7 @@ describe('AI Client - checkTone', () => {
             const result = await resultPromise;
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain('HTTP error 500');
-            expect(result.error).toContain('Server error occurred');
+            expect(result.error).toBe('API error 500: Server error occurred');
             expect(fetch).toHaveBeenCalledTimes(2); // Retried once
         });
 
@@ -299,7 +298,7 @@ describe('AI Client - checkTone', () => {
             const result = await checkTone('Test email', validSettings);
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain('HTTP error 401');
+            expect(result.error).toBe('API error 401: Invalid API key');
             expect(fetch).toHaveBeenCalledTimes(1);
         });
 
@@ -314,7 +313,7 @@ describe('AI Client - checkTone', () => {
             const result = await checkTone('Test email', validSettings);
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain('HTTP error 429');
+            expect(result.error).toBe('API error 429: Rate limit exceeded');
             expect(fetch).toHaveBeenCalledTimes(1);
         });
 
@@ -382,7 +381,7 @@ describe('AI Client - checkTone', () => {
             const result = await resultPromise;
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain('Network error');
+            expect(result.error).toBe('Network error: Could not connect to API server');
             expect(fetch).toHaveBeenCalledTimes(2); // Retried once
         });
 
@@ -572,7 +571,7 @@ describe('AI Client - checkTone', () => {
             const result = await checkTone('Test email content', validSettings);
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain('HTTP error 401');
+            expect(result.error).toBe('API error 401: Invalid API key');
             expect(fetch).toHaveBeenCalledTimes(1); // No retry
         });
 
