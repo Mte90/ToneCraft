@@ -8,11 +8,18 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSettings();
 
   loadAccountFilter();
+  loadWhitelist();
   
   // Save button click handler
   saveBtn.addEventListener('click', () => {
     saveSettings();
   });
+
+  // Add whitelist email button handler
+  const addWhitelistBtn = document.getElementById('addWhitelistBtn');
+  if (addWhitelistBtn) {
+    addWhitelistBtn.addEventListener('click', addWhitelistEmail);
+  }
 
   // Load stored account identifiers and populate text input
   async function loadAccountFilter() {
@@ -82,6 +89,108 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     } catch (error) {
       showStatus('Error saving account filter: ' + error.message, 'error');
+    }
+  }
+
+  // Whitelist management functions
+  async function loadWhitelist() {
+    try {
+      const { recipientWhitelist = [] } = await browser.storage.local.get({
+        recipientWhitelist: []
+      });
+      renderWhitelist(recipientWhitelist);
+    } catch (error) {
+      console.error('Error loading whitelist:', error);
+      showStatus('Error loading whitelist: ' + error.message, 'error');
+    }
+  }
+
+  function renderWhitelist(recipientWhitelist) {
+    const listContainer = document.getElementById('whitelistList');
+    if (!listContainer) return;
+
+    listContainer.innerHTML = '';
+
+    if (recipientWhitelist.length === 0) {
+      listContainer.innerHTML = '<div class="help-text">No whitelisted recipients yet</div>';
+      return;
+    }
+
+    recipientWhitelist.forEach((email) => {
+      const item = document.createElement('div');
+      item.style.cssText = 'display: flex; align-items: center; gap: 8px; padding: 4px 0;';
+      
+      const emailSpan = document.createElement('span');
+      emailSpan.textContent = email;
+      emailSpan.style.flex = '1';
+      
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '✕';
+      removeBtn.style.cssText = 'background: none; border: none; color: #dc3545; cursor: pointer; font-size: 16px; padding: 0 4px;';
+      removeBtn.title = 'Remove from whitelist';
+      removeBtn.addEventListener('click', () => removeWhitelistEmail(email));
+      
+      item.appendChild(emailSpan);
+      item.appendChild(removeBtn);
+      listContainer.appendChild(item);
+    });
+  }
+
+  function addWhitelistEmail() {
+    const input = document.getElementById('whitelistEmail');
+    if (!input) return;
+
+    const email = input.value.trim().toLowerCase();
+
+    // Validate email
+    if (!email) {
+      showStatus('Please enter an email address', 'error');
+      return;
+    }
+
+    if (!email.includes('@')) {
+      showStatus('Invalid email format (must contain @)', 'error');
+      return;
+    }
+
+    // Load current whitelist, add email if not present, save, re-render
+    browser.storage.local.get({ recipientWhitelist: [] }).then(({ recipientWhitelist }) => {
+      const whitelist = (recipientWhitelist || []).map(e => e.toLowerCase());
+      
+      // Dedupe
+      if (whitelist.includes(email)) {
+        showStatus('Email already in whitelist', 'error');
+        return;
+      }
+
+      whitelist.push(email);
+      
+      browser.storage.local.set({ recipientWhitelist: whitelist }).then(() => {
+        showStatus('Email added to whitelist', 'success');
+        loadWhitelist();
+        input.value = '';
+      }).catch((error) => {
+        showStatus('Error saving whitelist: ' + error.message, 'error');
+      });
+    });
+  }
+
+  async function removeWhitelistEmail(emailToRemove) {
+    try {
+      const { recipientWhitelist = [] } = await browser.storage.local.get({
+        recipientWhitelist: []
+      });
+      
+      const whitelist = recipientWhitelist.filter(
+        (email) => email.toLowerCase() !== emailToRemove.toLowerCase()
+      );
+      
+      await browser.storage.local.set({ recipientWhitelist: whitelist });
+      showStatus('Email removed from whitelist', 'success');
+      loadWhitelist();
+    } catch (error) {
+      showStatus('Error removing from whitelist: ' + error.message, 'error');
     }
   }
 

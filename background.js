@@ -30,7 +30,8 @@ async function handleOnBeforeSend(tab, details) {
             model: '',
             enabled: true,
             checkedAccounts: [],
-            customPrompt: ''
+            customPrompt: '',
+            recipientWhitelist: []
         });
 
         if (!settings.enabled || !settings.apiKey) {
@@ -49,6 +50,23 @@ async function handleOnBeforeSend(tab, details) {
         // If checkedAccounts is empty, check all accounts (default behavior)
         if (settings.checkedAccounts.length > 0 && !settings.checkedAccounts.includes(senderAccountId)) {
             return undefined;
+        }
+
+        // Skip tone check if ALL recipients are whitelisted (and there is at least one recipient)
+        const allRecipients = [
+            ...(details.to || []),
+            ...(details.cc || []),
+            ...(details.bcc || [])
+        ].map(r => r.toLowerCase());
+
+        const whitelistLowercased = (settings.recipientWhitelist || []).map(r => r.toLowerCase());
+
+        if (allRecipients.length > 0 && whitelistLowercased.length > 0) {
+            const allWhitelisted = allRecipients.every(recipient => whitelistLowercased.includes(recipient));
+            if (allWhitelisted) {
+                console.log('Skip tone check - all recipients are whitelisted');
+                return undefined;
+            }
         }
 
         const emailContent = await extractEmailContent(tab, details, composeDetails);
