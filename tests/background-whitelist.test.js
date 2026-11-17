@@ -32,16 +32,6 @@ class MockAbortController {
 }
 global.AbortController = MockAbortController;
 
-// Mock DOMParser for HTML parsing (jsdom env provides these)
-class MockDOMParser {
-    parseFromString(html, contentType) {
-        return {
-            body: { innerHTML: html || '' },
-            querySelectorAll: () => []
-        };
-    }
-}
-global.DOMParser = MockDOMParser;
 global.window = global.window || {};
 
 describe('Recipient Whitelist', () => {
@@ -152,10 +142,11 @@ describe('Recipient Whitelist', () => {
             // Recipient not in whitelist
             const result = await handleOnBeforeSend(mockTab, { to: ['other@example.com'] });
 
-            // Normal flow continues
-            expect(fetch).toHaveBeenCalledTimes(1);
-            // Result can be undefined (professional) or { cancel: true } (unprofessional)
-            // Both are valid - the key is that fetch WAS called
+            // Assert the AI request payload contains the draft text
+            const aiRequestContent = JSON.parse(fetch.mock.calls[0][1].body).messages[1].content;
+            expect(aiRequestContent).toContain('Test email');
+            // Assert the exact result of handleOnBeforeSend (professional = undefined)
+            expect(result).toBeUndefined();
         });
     });
 
@@ -201,8 +192,11 @@ describe('Recipient Whitelist', () => {
 
             const result = await handleOnBeforeSend(mockTab, { to: [], cc: [], bcc: [] });
 
-            // No recipients means NO skip - normal flow
-            expect(fetch).toHaveBeenCalledTimes(1);
+            // Assert the AI request payload contains the draft text
+            const aiRequestContent = JSON.parse(fetch.mock.calls[0][1].body).messages[1].content;
+            expect(aiRequestContent).toContain('Test email');
+            // Assert the exact result of handleOnBeforeSend (professional = undefined)
+            expect(result).toBeUndefined();
         });
     });
 
@@ -220,8 +214,46 @@ describe('Recipient Whitelist', () => {
 
             const result = await handleOnBeforeSend(mockTab, { to: ['user@example.com'] });
 
-            // Empty whitelist means NO skip - normal flow
-            expect(fetch).toHaveBeenCalledTimes(1);
+            // Assert the AI request payload contains the draft text
+            const aiRequestContent = JSON.parse(fetch.mock.calls[0][1].body).messages[1].content;
+            expect(aiRequestContent).toContain('Test email');
+            // Assert the exact result of handleOnBeforeSend (professional = undefined)
+            expect(result).toBeUndefined();
+        });
+    });
+
+    describe('Test 7: HTML filtering actually runs', () => {
+        test('div.moz-signature block text is absent from AI request while main text is present', async () => {
+            const bodyWithSignature = '<p>Test email</p><div class="moz-signature">-- <br>John Doe<br>john@example.com</div>';
+            browser.compose.getComposeDetails.mockResolvedValue({
+                body: bodyWithSignature,
+                to: ['other@example.com'],
+                cc: [],
+                bcc: [],
+                subject: 'Test',
+                identityId: 'id1'
+            });
+
+            browser.storage.local.get.mockResolvedValue({
+                apiEndpoint: 'https://api.example.com',
+                apiKey: 'test-key',
+                model: 'gpt-4',
+                enabled: true,
+                checkedAccounts: [],
+                recipientWhitelist: [],
+                customPrompt: ''
+            });
+
+            const result = await handleOnBeforeSend(mockTab, { to: ['other@example.com'] });
+
+            // Assert the AI request payload contains main text but NOT signature text
+            const aiRequestContent = JSON.parse(fetch.mock.calls[0][1].body).messages[1].content;
+            expect(aiRequestContent).toContain('Test email');
+            expect(aiRequestContent).not.toContain('John Doe');
+            expect(aiRequestContent).not.toContain('john@example.com');
+            expect(aiRequestContent).not.toContain('moz-signature');
+            // Assert the exact result of handleOnBeforeSend (professional = undefined)
+            expect(result).toBeUndefined();
         });
     });
 });

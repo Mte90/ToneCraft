@@ -2,4 +2,6 @@ node_modules/
 coverage/
 .sisyphus/
 .opencode/
-coverage/
+dist/
+*.xpi
+*.zip

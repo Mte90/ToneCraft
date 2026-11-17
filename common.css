@@ -370,3 +370,13 @@ table tr:nth-child(even) {
   max-height: 300px;
   overflow-y: auto;
 }
+
+/* Empty state for problem list */
+.problem-list li.empty-state:before {
+  content: "✓";
+  color: var(--green-50);
+}
+.problem-list li.empty-state {
+  color: var(--grey-50);
+  font-style: italic;
+}

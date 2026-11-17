@@ -26,13 +26,14 @@ npm install
 web-ext run
 ```
 
-### Manual installation in Thunderbird
-1. Open Thunderbird → Add‑ons → Extensions → Install Add‑on From File.
-2. Select the folder `dist` generated after `npm run build` or the XPI file.
+### Build and install
+1. Run `npm run build` to produce `dist/tonecraft-1.0.2.xpi`.
+2. Open Thunderbird → Add‑ons → Extensions → Install Add‑on From File.
+3. Select the XPI file from the `dist` folder.
 
-### Installing from XPI file
-1. Download `tonecraft.xpi` from the releases page.
-2. In Thunderbird, go to Add‑ons → Extensions → Install Add‑on From File and choose the XPI.
+### Installing the published release
+1. Open [the add-ons page](https://addons.thunderbird.net/thunderbird/addon/tonecraft/).
+2. In Thunderbird, go to Add‑ons → Extensions → Install Add‑on From File and choose the downloaded XPI.
 
 ## Configuration
 Open the extension settings page via the gear icon in the Thunderbird toolbar.
@@ -44,6 +45,8 @@ Provide one of the following examples:
 
 ### Enter API key
 Paste your API key in the "API Key" field. The key is stored only in your local browser profile.
+
+**Note:** A non-empty API key is required. For local models like Ollama that do not require authentication, use a placeholder value (e.g., `ollama`).
 
 ### Choose model and prompt
 Select a model (e.g., `gpt-4o`, `claude-3-sonnet`, `llama3`) and optionally edit the prompt that guides the tone suggestions.
@@ -60,4 +63,6 @@ When you compose a new email and click **Send**, the extension analyses the text
 - **No response** – Verify the model name is correct and the service is reachable.
 
 ## Privacy
-Your API key never leaves your computer. It is stored locally in the extension storage and is not sent to any third‑party server.
+Your API key is stored only in your local browser profile and is sent only to the AI endpoint you configure.
+The text of the email message being analyzed is transmitted to that AI endpoint for processing.
+The extension requests network permissions (`http://*/*`, `https://*/*`) to enable communication with your chosen AI service.

@@ -13,7 +13,9 @@
     "compose.send",
     "storage",
     "notifications",
-    "accountsRead"
+    "accountsRead",
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "scripts": ["src/ai-client.js", "background.js"]

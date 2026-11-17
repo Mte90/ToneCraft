@@ -8,6 +8,8 @@ function getTabIdFromUrl() {
 
 let currentTabId = getTabIdFromUrl();
 let analysisData = null;
+let actionTaken = false;
+let cleanupSent = false;
 
 // Receive analysis data from background script
 
@@ -29,23 +31,6 @@ browser.runtime.sendMessage({ action: 'getAnalysisData', tabId: currentTabId }, 
   }
   
 
-  renderDialog(analysisData);
-});
-browser.runtime.sendMessage({ action: 'getAnalysisData', tabId: currentTabId }, (response) => {
-  if (browser.runtime.lastError) {
-    console.error('Error receiving analysis data:', browser.runtime.lastError.message);
-    showError('Connection error with background script');
-    return;
-  }
-  
-  analysisData = response.analysisData;
-  
-  if (!analysisData) {
-    console.error('No analysis data received for tabId:', currentTabId);
-    showError('No email analysis found. Please try sending the email again.');
-    return;
-  }
-  
   renderDialog(analysisData);
 });
 
@@ -190,16 +175,22 @@ function signalIgnoreAndSend() {
 
 // Close the dialog window
 function closeDialog() {
-  // Clean up pending compose data when dialog is closed without action
-  if (currentTabId) {
+  if (cleanupSent) return;
+  cleanupSent = true;
+  // Clean up pending compose data when the dialog is dismissed without an action
+  if (currentTabId && !actionTaken) {
     browser.runtime.sendMessage({ action: 'cleanupTab', tabId: currentTabId });
   }
   window.close();
 }
 
+window.addEventListener('pagehide', closeDialog);
+window.addEventListener('unload', closeDialog);
+
 // Event listeners for buttons
 // Replace Text button - send rewritten text to compose window
 document.getElementById('replaceButton').addEventListener('click', () => {
+  actionTaken = true;
   browser.runtime.sendMessage({ action: 'replaceText', tabId: currentTabId }).then(() => {
     window.close();
   }).catch(err => {
@@ -209,6 +200,7 @@ document.getElementById('replaceButton').addEventListener('click', () => {
 });
 // Send Anyway button - send email without modifications
 document.getElementById('ignoreButton').addEventListener('click', () => {
+  actionTaken = true;
   browser.runtime.sendMessage({ action: 'ignoreAndSend', tabId: currentTabId }).then(() => {
     window.close();
   }).catch(err => {
@@ -219,6 +211,7 @@ document.getElementById('ignoreButton').addEventListener('click', () => {
 
 // Edit Original button
 document.getElementById('editButton')?.addEventListener('click', () => {
+  actionTaken = true;
   browser.runtime.sendMessage({ action: 'editOriginal', tabId: currentTabId }).then(() => {
     window.close();
   }).catch(err => {

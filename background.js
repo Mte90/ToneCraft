@@ -8,6 +8,8 @@ let consecutiveApiFailures = 0;
 
 // Pending compose operations indexed by tab ID
 const pendingComposes = new Map();
+// Extracted email structure indexed by tab ID, beside the pending compose entry
+const extractedEmailStructures = new Map();
 // Set of tab IDs that should skip tone check when sending
 const tabsToSkipCheck = new Set();
 function initialize() {
@@ -22,9 +24,13 @@ async function handleOnBeforeSend(tab, details) {
         return undefined;
     }
 
+    // Declared outside the try so the recovery path below can read them
+    let settings = null;
+    let senderAccountId = null;
+
     try {
 
-        const settings = await browser.storage.local.get({
+        settings = await browser.storage.local.get({
             apiEndpoint: '',
             apiKey: '',
             model: '',
@@ -39,12 +45,11 @@ async function handleOnBeforeSend(tab, details) {
             return undefined;
         }
 
-        // Get sender account ID from compose details
-        const composeDetails = await browser.compose.getComposeDetails(tab.id);
-        const identityId = composeDetails.identityId;
-        // Find the account that contains this identity
+        // Resolve the sender account before the compose body is read, so the
+        // recovery path below still knows which account is configured
         const accounts = await browser.accounts.list();
-        const senderAccountId = accounts.find(acc => acc.identities?.some(id => id.id === identityId))?.id;
+        const identityId = details.identityId || (await browser.compose.getComposeDetails(tab.id)).identityId;
+        senderAccountId = accounts.find(acc => acc.identities?.some(id => id.id === identityId))?.id;
         
         // Skip tone check if account is NOT in checkedAccounts (allowlist)
         // If checkedAccounts is empty, check all accounts (default behavior)
@@ -67,6 +72,15 @@ async function handleOnBeforeSend(tab, details) {
                 console.log('Skip tone check - all recipients are whitelisted');
                 return undefined;
             }
+        }
+
+        const composeDetails = await browser.compose.getComposeDetails(tab.id);
+
+        // Skip tone check when the user forwards a message without writing
+        // anything of their own: only user-authored text is worth analysing.
+        if (isUnmodifiedForward(composeDetails)) {
+            console.log('Skip tone check - unmodified forward');
+            return undefined;
         }
 
         const emailContent = await extractEmailContent(tab, details, composeDetails);
@@ -95,22 +109,10 @@ async function handleOnBeforeSend(tab, details) {
             }
             
             // Account is not configured - graceful degradation with notification
-            showNotification(
-                'AI Check Failed',
-                'AI check failed. Sending anyway. Error: ' + result.error
-            );
-            
-            if (consecutiveApiFailures >= 2) {
-                showNotification(
-                    'AI Check Failed',
-                    'Multiple API failures occurred. Check your API settings. Email will be sent without tone check.'
-                );
-            } else {
-                showNotification(
-                    'AI Check Failed',
-                    'Could not check email tone: ' + result.error + '. Email will be sent without tone check.'
-                );
-            }
+            const failureMessage = consecutiveApiFailures >= 2
+                ? 'Multiple API failures occurred. Check your API settings. Email will be sent without tone check.'
+                : 'Could not check email tone: ' + result.error + '. Email will be sent without tone check.';
+            showNotification('AI Check Failed', failureMessage);
             return undefined;
         }
         if (result.data.isProfessional) {
@@ -122,7 +124,7 @@ async function handleOnBeforeSend(tab, details) {
         }
 
         // Get extracted structure for this tab (if available)
-        const extractedStructure = window.extractedEmailStructure ? window.extractedEmailStructure[tab.id] : null;
+        const extractedStructure = extractedEmailStructures.get(tab.id) || null;
 
         pendingComposes.set(tab.id, {
             tab,
@@ -146,12 +148,12 @@ async function handleOnBeforeSend(tab, details) {
         console.error('Error in onBeforeSend handler:', error);
         
         // Check if we have access to settings (might be undefined if error occurred before)
-        if (typeof settings !== 'undefined') {
+        if (settings) {
             // If account is configured (in checkedAccounts), block send on error
             if (senderAccountId && settings.checkedAccounts.includes(senderAccountId)) {
                 
                 // Get extracted structure for this tab (if available)
-                const extractedStructure = window.extractedEmailStructure ? window.extractedEmailStructure[tab.id] : null;
+                const extractedStructure = extractedEmailStructures.get(tab.id) || null;
                 
                 pendingComposes.set(tab.id, {
                     tab,
@@ -197,12 +199,11 @@ async function extractEmailContent(tab, details, composeDetails = null) {
             
             // Store extracted structure for later reconstruction
             if (tab.id) {
-                window.extractedEmailStructure = window.extractedEmailStructure || {};
-                window.extractedEmailStructure[tab.id] = {
+                extractedEmailStructures.set(tab.id, {
                     originalQuotedContent: quotedContent,
                     originalSignatureContent: signatureContent,
                     originalMainContent: mainContent
-                };
+                });
             }
             
             // Send only mainContent to AI (not quotes, not signature)
@@ -214,6 +215,27 @@ async function extractEmailContent(tab, details, composeDetails = null) {
         console.error('Error extracting email content:', error);
         return details.plainTextBody || '';
     }
+}
+
+/**
+ * Detect a message the user forwarded without writing anything of their own.
+ * Thunderbird wraps an inline forward in a div.moz-forward-container, so any
+ * text left outside that container, a quote or a signature is user input.
+ *
+ * @param {Object} composeDetails - ComposeDetails from browser.compose
+ * @returns {boolean} - True when the message is an unmodified forward
+ */
+function isUnmodifiedForward(composeDetails) {
+    if (!composeDetails || composeDetails.type !== 'forward' || !composeDetails.body) {
+        return false;
+    }
+
+    const doc = new DOMParser().parseFromString(composeDetails.body, 'text/html');
+    ['div.moz-forward-container', 'div.moz-cite-prefix', '[class^="moz-signature"]', 'blockquote']
+        .forEach(selector => doc.querySelectorAll(selector).forEach(el => el.remove()));
+
+    const remainingText = doc.body.textContent.replace(/\u00a0/g, ' ').trim();
+    return remainingText.length === 0;
 }
 
 /**
@@ -264,6 +286,85 @@ const filterQuotedReplies = html => filterDOM(html, ['blockquote'], doc => {
 });
 
 /**
+ * Filter quoted replies with context - only strips text that echoes original quoted content
+ * @param {string} html - HTML content to filter
+ * @param {string} knownQuotedText - Normalized quoted text from original body
+ * @returns {string} - Filtered HTML
+ */
+function filterQuotedRepliesWithContext(html, knownQuotedText) {
+    if (!html || typeof html !== 'string') return html;
+    
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    
+    // Remove blockquotes only when their text is contained in known quoted text
+    doc.querySelectorAll('blockquote').forEach(el => {
+        const elText = el.textContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+        // Only remove if this blockquote's text is contained in the known quoted text
+        if (knownQuotedText && elText && knownQuotedText.includes(elText)) {
+            el.remove();
+        }
+    });
+    
+    // Remove p/div elements starting with > only when their text is in known quoted text
+    doc.querySelectorAll('p, div').forEach(el => {
+        const elText = el.textContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+        if (elText.startsWith('>') && knownQuotedText && knownQuotedText.includes(elText)) {
+            el.remove();
+        }
+    });
+    
+    return doc.body.innerHTML;
+}
+
+
+/**
+ * Remove markdown code fences from model output, keeping the fenced content.
+ * @param {string} text - Raw model output
+ * @returns {string} - Text without fences
+ */
+function stripCodeFences(text) {
+    if (!text) return '';
+    return text
+        .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
+        .replace(/```[^\n]*\n?/g, '')
+        .replace(/```/g, '')
+        .trim();
+}
+
+/**
+ * Serialise a rewrite that replaces a paragraph region, one <p> per non-empty
+ * line so the author's paragraph structure survives the round trip.
+ * @param {string} text - Rewrite, fences already allowed
+ * @returns {string} - HTML
+ */
+function rewriteToParagraphs(text) {
+    const stripped = stripCodeFences(text);
+    if (/<[a-z][\s\S]*>/i.test(stripped)) return stripped;
+    return stripped
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => '<p>' + line + '</p>')
+        .join('');
+}
+
+/**
+ * Serialise a rewrite that replaces the whole body, protecting the line breaks
+ * the model wrote. A single-line rewrite is returned unchanged.
+ * @param {string} text - Rewrite, fences already allowed
+ * @returns {string} - HTML
+ */
+function rewriteToBodyHtml(text) {
+    const stripped = stripCodeFences(text);
+    if (/<[a-z][\s\S]*>/i.test(stripped)) return stripped;
+    return stripped
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .join('<br>');
+}
+
+/**
  * Extract email content structure from HTML body
  * Parses HTML and separates main content from quoted replies and signatures
  * 
@@ -290,18 +391,30 @@ function extractEmailStructure(html) {
         // Clone document to avoid modifying original during extraction
         const workingDoc = doc.cloneNode(true);
         
-        // Extract quoted content (blockquotes - handle nested quotes)
+        // Extract quoted content (blockquotes - handle nested quotes, EXCLUDE moz-signatures)
         const blockquotes = workingDoc.querySelectorAll('blockquote');
         let quotedContent = '';
         for (let i = 0; i < blockquotes.length; i++) {
-            quotedContent += blockquotes[i].outerHTML;
+            const bq = blockquotes[i];
+            // Skip blockquotes that contain moz-signature
+            if (!bq.querySelector('[class^="moz-signature"]')) {
+                quotedContent += bq.outerHTML;
+            }
         }
         
-        // Extract signature content (moz- signature elements)
+        // Extract signature content (moz- signature elements, including those inside blockquotes)
         const mozSignatures = workingDoc.querySelectorAll('[class^="moz-signature"]');
         let signatureContent = '';
         for (let i = 0; i < mozSignatures.length; i++) {
             signatureContent += mozSignatures[i].outerHTML;
+        }
+        // Also include the blockquote wrapper if signature is inside one
+        for (let i = 0; i < mozSignatures.length; i++) {
+            const sig = mozSignatures[i];
+            const parentBlockquote = sig.closest('blockquote');
+            if (parentBlockquote && !signatureContent.includes(parentBlockquote.outerHTML)) {
+                signatureContent = parentBlockquote.outerHTML + signatureContent;
+            }
         }
         
         // Detect and extract manual signatures (lines starting with "-- ")
@@ -464,6 +577,7 @@ function handleMessage(message, sender, sendResponse) {
         // Clean up pending compose data for a specific tab
         if (message.tabId) {
             pendingComposes.delete(Number(message.tabId));
+            extractedEmailStructures.delete(Number(message.tabId));
         }
         return false;
     }
@@ -492,6 +606,7 @@ async function handleIgnoreAndSend(tabId) {
     await browser.windows.update(tab.windowId, { focused: true });
 
     pendingComposes.delete(tab.id);
+    extractedEmailStructures.delete(tab.id);
     await browser.compose.sendMessage(tab.id);
 
     showNotification(
@@ -507,14 +622,9 @@ async function handleReplaceText(tabId) {
         entry = pendingComposes.get(tabId);
         actualTabId = tabId;
     } else {
-        // Fallback to last entry if tabId not found
-        const entries = Array.from(pendingComposes.entries());
-        const lastEntry = entries.pop();
-        if (!lastEntry) {
-            console.error('No pending compose tab');
-            return;
-        }
-        [actualTabId, entry] = lastEntry;
+        // P1c: No fallback - error out with console.error, never touch another tab
+        console.error('No pending compose tab for tabId:', tabId);
+        return;
     }
     
     if (!entry) {
@@ -551,12 +661,14 @@ async function handleReplaceText(tabId) {
         const { quotedContent: currentQuoted, signatureContent: currentSignature, mainContent: currentMainContent } = extractEmailStructure(currentBody);
 
         // Get the originalMainContent that was sent to AI
-        const extractedStructure = window.extractedEmailStructure && window.extractedEmailStructure[tab.id];
+        const extractedStructure = extractedEmailStructures.get(tab.id);
         const originalMainContent = extractedStructure?.originalMainContent || '';
 
+        const rewriteWithoutFences = stripCodeFences(analysisData.rewrittenEmail);
         // Clean the rewritten email
-        const cleanRewrittenEmail = filterQuotedReplies(analysisData.rewrittenEmail);
-
+        const knownQuotedText = currentQuoted ? currentQuoted.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim() : '';
+        const cleanRewrittenEmail = filterQuotedRepliesWithContext(rewriteWithoutFences, knownQuotedText);
+        
         // Parse current body to find target block for replacement
         const parser = new DOMParser();
         const currentDoc = parser.parseFromString(currentBody, 'text/html');
@@ -567,8 +679,9 @@ async function handleReplaceText(tabId) {
         
         if (!hasQuotes && !hasSignature) {
             // No quotes or signature - output is just the rewritten content (plain text)
-            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
+            await browser.compose.setComposeDetails(tab.id, { body: rewriteToBodyHtml(cleanRewrittenEmail) });
             pendingComposes.delete(actualTabId);
+            extractedEmailStructures.delete(actualTabId);
             return;
         }
         
@@ -590,9 +703,18 @@ async function handleReplaceText(tabId) {
         }
 
         if (candidateParagraphs.length === 0) {
-            // No candidate paragraphs found - just use rewritten content as full body
-            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
+            // P1b: No candidate paragraphs - preserve quotes/signature, replace only main text
+            // Build new body: rewrite + quotes + signature
+            let newBody = rewriteToParagraphs(cleanRewrittenEmail);
+            if (currentQuoted && currentQuoted.trim().length > 0) {
+                newBody += currentQuoted;
+            }
+            if (currentSignature && currentSignature.trim().length > 0) {
+                newBody += currentSignature;
+            }
+            await browser.compose.setComposeDetails(tab.id, { body: newBody });
             pendingComposes.delete(actualTabId);
+            extractedEmailStructures.delete(actualTabId);
             return;
         }
 
@@ -601,18 +723,31 @@ async function handleReplaceText(tabId) {
         let replaced = false;
 
         if (originalMainContent && originalMainContent.trim().length > 0) {
-            // Normalize for comparison (handle &nbsp; vs space)
-            const normalizedOriginal = originalMainContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+            // P2b: Parse originalMainContent to get individual paragraphs for matching
+            const origDoc = new DOMParser().parseFromString(originalMainContent, 'text/html');
+            const origParagraphs = origDoc.querySelectorAll('p');
             
             for (let i = 0; i < candidateParagraphs.length; i++) {
                 const p = candidateParagraphs[i];
-                const pText = p.textContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+                const pText = p.textContent
+                    .replace(/&nbsp;/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
                 
-                // Check if this paragraph's text contains or matches the original text
-                if (pText.includes(normalizedOriginal) || normalizedOriginal.includes(pText)) {
-                    targetParagraph = p;
-                    break;
+                // Check each paragraph in originalMainContent (P2b: decoded comparison)
+                for (let j = 0; j < origParagraphs.length; j++) {
+                    const origPText = origParagraphs[j].textContent
+                        .replace(/&nbsp;/g, ' ')
+                        .replace(/&amp;/g, '&')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    
+                    if (pText.includes(origPText) || origPText.includes(pText)) {
+                        targetParagraph = p;
+                        break;
+                    }
                 }
+                if (targetParagraph) break;
             }
         }
 
@@ -621,22 +756,78 @@ async function handleReplaceText(tabId) {
             targetParagraph = candidateParagraphs[0];
         }
 
-        // Replace the target paragraph
+        // P2d: Replace the target paragraph(s) - build fragment, preserve attributes, no double-wrapping
         if (targetParagraph) {
-            targetParagraph.outerHTML = '<p>' + cleanRewrittenEmail + '</p>';
+            const finalRewrite = rewriteToParagraphs(cleanRewrittenEmail);
+            // The HTML parser already consumed any outer <html>/<body> wrapper
+            const rewriteBody = new DOMParser().parseFromString(finalRewrite, 'text/html').body;
+            
+            // P2d: Build fragment from rewrite body children
+            const fragment = currentDoc.createDocumentFragment();
+            const children = Array.from(rewriteBody.childNodes);
+            children.forEach(child => fragment.appendChild(child.cloneNode(true)));
+            
+            // P2d: Preserve target's attributes on first element, remove all matching paragraphs
+            const allTargetParagraphs = [];
+            if (originalMainContent && originalMainContent.trim().length > 0) {
+                // P2b: Parse originalMainContent to get individual paragraphs for matching
+                const origDoc = new DOMParser().parseFromString(originalMainContent, 'text/html');
+                const origParagraphs = origDoc.querySelectorAll('p');
+                const candidateParagraphs = currentDoc.querySelectorAll('p:not(blockquote p):not([class^="moz-signature"])');
+                for (let i = 0; i < candidateParagraphs.length; i++) {
+                    const p = candidateParagraphs[i];
+                    const pText = p.textContent.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+                    // P2b: Check each paragraph in originalMainContent (decoded comparison)
+                    for (let j = 0; j < origParagraphs.length; j++) {
+                        const origPText = origParagraphs[j].textContent
+                            .replace(/&nbsp;/g, ' ')
+                            .replace(/&amp;/g, '&')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                        if (pText.includes(origPText) || origPText.includes(pText)) {
+                            allTargetParagraphs.push(p);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (allTargetParagraphs.length > 0) {
+                // P2d: Replace first with fragment (preserving attributes on first element)
+                const firstTarget = allTargetParagraphs[0];
+                const firstFragmentChild = fragment.firstChild;
+                if (firstFragmentChild && firstFragmentChild.nodeType === 1) {
+                    // Carry over style/class/dir from target
+                    if (firstTarget.style.length > 0) {
+                        firstFragmentChild.setAttribute('style', firstTarget.style.cssText);
+                    }
+                    if (firstTarget.className) {
+                        firstFragmentChild.className = firstTarget.className;
+                    }
+                    if (firstTarget.getAttribute('dir')) {
+                        firstFragmentChild.setAttribute('dir', firstTarget.getAttribute('dir'));
+                    }
+                }
+                firstTarget.replaceWith(fragment);
+                // Remove remaining target paragraphs
+                for (let i = 1; i < allTargetParagraphs.length; i++) {
+                    allTargetParagraphs[i].remove();
+                }
+            } else {
+                // Fallback: replace first candidate
+                targetParagraph.replaceWith(fragment);
+            }
+            
             await browser.compose.setComposeDetails(tab.id, { body: currentDoc.body.innerHTML });
             replaced = true;
         }
 
-        // If still no replacement happened, use the rewritten content as full body
-        if (!replaced) {
-            await browser.compose.setComposeDetails(tab.id, { body: cleanRewrittenEmail });
-        }
     } catch (error) {
         console.error('Error replacing email text:', error);
         showNotification('Replace Failed', error.message || 'Could not replace email text.');
     } finally {
         pendingComposes.delete(actualTabId);
+        extractedEmailStructures.delete(actualTabId);
     }
 }
 
@@ -658,6 +849,7 @@ async function handleEditOriginal(tabId) {
     } finally {
 
         pendingComposes.delete(tabId || tab.id);
+        extractedEmailStructures.delete(tabId || tab.id);
     }
 }
 
@@ -677,12 +869,14 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         filterMozElements,
         filterQuotedReplies,
+        isUnmodifiedForward,
         handleOnBeforeSend,
         extractEmailContent,
         openDialogWindow,
         extractEmailStructure,
         handleReplaceText,
-        pendingComposes
+        pendingComposes,
+        extractedEmailStructures
     };
 }
 initialize();
